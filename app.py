@@ -475,100 +475,270 @@ if strava_data is not None and st.session_state.get("wrapup_ready", False) and b
 
 
 if strava_data is not None and st.session_state.get("wrapup_ready", False) and st.checkbox('Show 2025 workouts'):
-    st.subheader('2025 Workouts')
-    # Ensure numeric distance for proper aggregation/formatting without chained assignment
-    distance_numeric = pd.to_numeric(workouts_this_year['Distance'], errors='coerce')
-    st.write(workouts_this_year)
-    total_distance_km = distance_numeric.sum()
-    st.caption(f"Total distance in 2025: {total_distance_km:.2f} km")
+    with col_strava if 'col_strava' in locals() and col_strava is not None else st:
+        st.subheader('2025 Workouts')
+        # Ensure numeric distance for proper aggregation/formatting without chained assignment
+        distance_numeric = pd.to_numeric(workouts_this_year['Distance'], errors='coerce')
+        st.write(workouts_this_year)
+        total_distance_km = distance_numeric.sum()
+        st.caption(f"Total distance in 2025: {total_distance_km:.2f} km")
+
+if strava_data is not None and st.session_state.get("wrapup_ready", False):
+    with col_strava if 'col_strava' in locals() and col_strava is not None else st:
+        st.subheader('Workouts by Activity Type')
+        # Aggregate counts and metrics per activity type
+        type_counts = (
+            workouts_this_year.groupby("Activity Type").agg(
+                count=("Activity Name", "count"),
+                names=("Activity Name", lambda x: ", ".join(x.tolist()[:20])),
+                distance_km=("Distance", lambda s: pd.to_numeric(s, errors="coerce").sum()),
+                elev_gain_m=("Elevation Gain", lambda s: pd.to_numeric(s, errors="coerce").sum()),
+                avg_hr=("Average Heart Rate", lambda s: pd.to_numeric(s, errors="coerce").mean())
+            ).reset_index()
+        )
+
+        # Ensure clean labels and ints
+        type_counts["Activity Type"] = type_counts["Activity Type"].fillna("Unknown").astype(str)
+        type_counts["count"] = pd.to_numeric(type_counts["count"], errors="coerce").fillna(0).astype(int)
+
+        # Base bar chart: workout counts with rich tooltips
+        type_bar = (
+            alt.Chart(type_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("Activity Type:N", title="Activity Type"),
+                y=alt.Y("count:Q", title="Workouts", axis=alt.Axis(format="d")),
+                color=alt.Color("Activity Type:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("Activity Type:N", title="Type"),
+                    alt.Tooltip("count:Q", title="Count", format="d"),
+                    alt.Tooltip("distance_km:Q", title="Distance (km)", format=".2f"),
+                    alt.Tooltip("elev_gain_m:Q", title="Elevation Gain (m)", format=".0f"),
+                    alt.Tooltip("avg_hr:Q", title="Avg HR", format=".0f")
+                ]
+            )
+            .properties(height=300)
+        )
+
+        # Overlay lines: elevation gain and average heart rate scaled to secondary axes
+        type_elev_line = (
+            alt.Chart(type_counts)
+            .mark_line(color="#ff7675", strokeWidth=2)
+            .encode(
+                x="Activity Type:N",
+                y=alt.Y("elev_gain_m:Q", title="Elevation Gain (m)", axis=alt.Axis(format=".0f"))
+            )
+        )
+
+        type_hr_line = (
+            alt.Chart(type_counts)
+            .mark_line(color="#0984e3", strokeWidth=2)
+            .encode(
+                x="Activity Type:N",
+                y=alt.Y("avg_hr:Q", title="Avg HR", axis=alt.Axis(format=".0f"))
+            )
+        )
+
+        type_select = alt.selection_single(fields=["Activity Type"], empty="none")
+        type_bar = type_bar.add_selection(type_select)
+
+        names_base = workouts_this_year[["Activity Name", "Activity Type"]].copy()
+        names_base["Line"] = names_base["Activity Name"].astype(str)
+
+        names_chart = (
+            alt.Chart(names_base)
+            .mark_text(align="center", baseline="middle", size=14, color="white")
+            .encode(
+                y=alt.Y("Line:N", sort=None, axis=alt.Axis(title=None, labels=False, ticks=False)),
+                text="Line:N"
+            )
+            .transform_filter(type_select)
+            .properties(height=500)
+        )
+
+        st.altair_chart(
+            alt.vconcat(
+                alt.layer(type_bar, type_elev_line, type_hr_line),
+                names_chart
+            )
+            .resolve_scale(y="independent")
+            .configure_axis(labelFontSize=14, titleFontSize=14)
+            .configure_legend(labelFontSize=14, titleFontSize=14),
+            use_container_width=True
+        )
+
+if strava_data is not None and st.session_state.get("wrapup_ready", False):
+    with col_strava if 'col_strava' in locals() and col_strava is not None else st:
+        st.subheader('Workouts by Month')
+        month_df = workouts_this_year.copy()
+        month_df["Month"] = month_df["Activity Date"].dt.strftime('%Y-%m')
+        month_counts = (
+            month_df.groupby("Month").agg(
+                count=("Activity Name", "count"),
+                names=("Activity Name", lambda x: ", ".join(x.tolist()[:20])),
+                distance_km=("Distance", lambda s: pd.to_numeric(s, errors="coerce").sum()),
+                elev_gain_m=("Elevation Gain", lambda s: pd.to_numeric(s, errors="coerce").sum()),
+                avg_hr=("Average Heart Rate", lambda s: pd.to_numeric(s, errors="coerce").mean())
+            ).reset_index()
+        )
+        month_counts["count"] = pd.to_numeric(month_counts["count"], errors="coerce").fillna(0).astype(int)
+
+        month_bar = (
+            alt.Chart(month_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("Month:N", title="Month"),
+                y=alt.Y("count:Q", title="Workouts", axis=alt.Axis(format="d")),
+                color=alt.Color("Month:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("Month:N", title="Month"),
+                    alt.Tooltip("count:Q", title="Count", format="d"),
+                    alt.Tooltip("distance_km:Q", title="Distance (km)", format=".2f"),
+                    alt.Tooltip("elev_gain_m:Q", title="Elevation Gain (m)", format=".0f"),
+                    alt.Tooltip("avg_hr:Q", title="Avg HR", format=".0f")
+                ]
+            )
+            .properties(height=300)
+        )
+
+        month_select = alt.selection_single(fields=["Month"], empty="none")
+        month_bar = month_bar.add_selection(month_select)
+
+        month_elev_line = (
+            alt.Chart(month_counts)
+            .mark_line(color="#ff7675", strokeWidth=2)
+            .encode(
+                x="Month:N",
+                y=alt.Y("elev_gain_m:Q", title="Elevation Gain (m)", axis=alt.Axis(format=".0f"))
+            )
+        )
+
+        month_hr_line = (
+            alt.Chart(month_counts)
+            .mark_line(color="#0984e3", strokeWidth=2)
+            .encode(
+                x="Month:N",
+                y=alt.Y("avg_hr:Q", title="Avg HR", axis=alt.Axis(format=".0f"))
+            )
+        )
+
+        month_names_base = month_df[["Activity Name", "Month"]].copy()
+        month_names_base["Line"] = month_names_base["Activity Name"].astype(str)
+
+        month_names_chart = (
+            alt.Chart(month_names_base)
+            .mark_text(align="center", baseline="middle", size=14, color="white")
+            .encode(
+                y=alt.Y("Line:N", sort=None, axis=alt.Axis(title=None, labels=False, ticks=False)),
+                text="Line:N"
+            )
+            .transform_filter(month_select)
+            .properties(height=500)
+        )
+
+        st.altair_chart(
+            alt.vconcat(
+                alt.layer(month_bar, month_elev_line, month_hr_line),
+                month_names_chart
+            )
+            .resolve_scale(y="independent")
+            .configure_axis(labelFontSize=14, titleFontSize=14)
+            .configure_legend(labelFontSize=14, titleFontSize=14),
+            use_container_width=True
+        )
 
 if book_data is not None and st.session_state.get("wrapup_ready", False) and st.checkbox('Show 2025 books'):
-    st.subheader('2025 Books')
-    st.write(books_this_year)
-    st.caption(f"Total pages read in 2025: {books_this_year['Number of Pages'].sum():.0f} pages")
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        st.subheader('2025 Books')
+        st.write(books_this_year)
+        st.caption(f"Total pages read in 2025: {books_this_year['Number of Pages'].sum():.0f} pages")
 
 if book_data is not None and st.session_state.get("wrapup_ready", False):
-    st.subheader('Books ratings')
-    df_ratings = (
-        books_this_year.groupby("My Rating").agg(
-            count=("Title", "count"),
-            titles=("Title", lambda x: ", ".join(x.tolist()[:15]))
-        ).reset_index()
-    )
-
-    # Ensure rating labels are integers and counts are ints
-    df_ratings["My Rating"] = pd.to_numeric(df_ratings["My Rating"], errors="coerce").fillna(0).astype(int)
-    df_ratings["count"] = df_ratings["count"].astype(int)
-
-    rating_chart = (
-        alt.Chart(df_ratings)
-        .mark_bar()
-        .encode(
-            x=alt.X("My Rating:N", title="Rating"),
-            y=alt.Y("count:Q", title="Books", axis=alt.Axis(format="d")),
-            color=alt.Color(
-                "My Rating:N",
-                title="Rating",
-                scale=alt.Scale(scheme="tableau10"),
-                legend=alt.Legend(title="Rating")
-            ),
-            tooltip=[alt.Tooltip("My Rating:N", title="Rating"),
-                        alt.Tooltip("count:Q", title="Count", format="d")]
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        st.subheader('Books ratings')
+        df_ratings = (
+            books_this_year.groupby("My Rating").agg(
+                count=("Title", "count"),
+                titles=("Title", lambda x: ", ".join(x.tolist()[:15]))
+            ).reset_index()
         )
-        .properties(height=300)
-    )
 
-    # Interactive selection: click a bar to filter titles below
-    rating_select = alt.selection_single(fields=["My Rating"], empty="none")
-    rating_chart = rating_chart.add_selection(rating_select)
+        # Ensure rating labels are integers and counts are ints
+        df_ratings["My Rating"] = pd.to_numeric(df_ratings["My Rating"], errors="coerce").fillna(0).astype(int)
+        df_ratings["count"] = df_ratings["count"].astype(int)
 
-    titles_base = books_this_year[["Title", "Author", "My Rating"]].copy()
-    titles_base = titles_base.dropna(subset=["Title", "Author"])
-    titles_base = titles_base[(titles_base["Title"].str.len() > 0) & (titles_base["Author"].str.len() > 0)]
-    titles_base["Line"] = titles_base["Title"].str.strip() + " — " + titles_base["Author"].str.strip()
-
-    titles_chart = (
-        alt.Chart(titles_base)
-        .mark_text(align="center", baseline="middle", size=14, color="white")
-        .encode(
-            y=alt.Y("Line:N", sort=None, axis=alt.Axis(title=None, labels=False, ticks=False)),
-            text="Line:N"
+        rating_chart = (
+            alt.Chart(df_ratings)
+            .mark_bar()
+            .encode(
+                x=alt.X("My Rating:N", title="Rating"),
+                y=alt.Y("count:Q", title="Books", axis=alt.Axis(format="d")),
+                color=alt.Color(
+                    "My Rating:N",
+                    title="Rating",
+                    scale=alt.Scale(scheme="tableau10"),
+                    legend=alt.Legend(title="Rating")
+                ),
+                tooltip=[alt.Tooltip("My Rating:N", title="Rating"),
+                            alt.Tooltip("count:Q", title="Count", format="d")]
+            )
+            .properties(height=300)
         )
-        .transform_filter(rating_select)
-        .properties(height=500)
-    )
 
-    st.altair_chart(
-        alt.vconcat(
-            rating_chart,
-            titles_chart
-        ).configure_axis(labelFontSize=14, titleFontSize=14)
-            .configure_legend(labelFontSize=14, titleFontSize=14),
-        use_container_width=True
-    )
+        # Interactive selection: click a bar to filter titles below
+        rating_select = alt.selection_single(fields=["My Rating"], empty="none")
+        rating_chart = rating_chart.add_selection(rating_select)
+
+        titles_base = books_this_year[["Title", "Author", "My Rating"]].copy()
+        titles_base = titles_base.dropna(subset=["Title", "Author"])
+        titles_base = titles_base[(titles_base["Title"].str.len() > 0) & (titles_base["Author"].str.len() > 0)]
+        titles_base["Line"] = titles_base["Title"].str.strip() + " — " + titles_base["Author"].str.strip()
+
+        titles_chart = (
+            alt.Chart(titles_base)
+            .mark_text(align="center", baseline="middle", size=14, color="white")
+            .encode(
+                y=alt.Y("Line:N", sort=None, axis=alt.Axis(title=None, labels=False, ticks=False)),
+                text="Line:N"
+            )
+            .transform_filter(rating_select)
+            .properties(height=500)
+        )
+
+        st.altair_chart(
+            alt.vconcat(
+                rating_chart,
+                titles_chart
+            ).configure_axis(labelFontSize=14, titleFontSize=14)
+                .configure_legend(labelFontSize=14, titleFontSize=14),
+            use_container_width=True
+        )
 
 selected_rating = None
 if book_data is not None and st.session_state.get("wrapup_ready", False):
-    selected_rating = st.selectbox(
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        selected_rating = st.selectbox(
         "Show books with rating:",
         options=sorted(df_ratings["My Rating"].unique()),
         index=0 if len(df_ratings) else None,
         placeholder="Select a rating"
-    )
+        )
 
 if book_data is not None and st.session_state.get("wrapup_ready", False) and selected_rating is not None:
-    st.subheader(f"Books rated {selected_rating}")
-    df_sel = books_this_year.loc[
-        books_this_year["My Rating"] == selected_rating,
-        ["Title", "Author", "Year Published", "My Rating"]
-    ].copy()
-    # Ensure integers display without commas
-    df_sel["Year Published"] = pd.to_numeric(df_sel["Year Published"], errors="coerce").astype('Int64').astype(str)
-    df_sel["My Rating"] = pd.to_numeric(df_sel["My Rating"], errors="coerce").astype('Int64').astype(str)
-    st.write(df_sel)
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        st.subheader(f"Books rated {selected_rating}")
+        df_sel = books_this_year.loc[
+            books_this_year["My Rating"] == selected_rating,
+            ["Title", "Author", "Year Published", "My Rating"]
+        ].copy()
+        # Ensure integers display without commas
+        df_sel["Year Published"] = pd.to_numeric(df_sel["Year Published"], errors="coerce").astype('Int64').astype(str)
+        df_sel["My Rating"] = pd.to_numeric(df_sel["My Rating"], errors="coerce").astype('Int64').astype(str)
+        st.write(df_sel)
 
 if book_data is not None and st.session_state.get("wrapup_ready", False):
-    st.subheader('Year Published')
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        st.subheader('Year Published')
     df_years = (
         books_this_year.groupby("Original Publication Year").agg(
             count=("Title", "count"),
@@ -585,24 +755,26 @@ if book_data is not None and st.session_state.get("wrapup_ready", False):
 
 selected_year = None
 if book_data is not None and st.session_state.get("wrapup_ready", False):
-    selected_year = st.selectbox(
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        selected_year = st.selectbox(
         "Show books from year:",
         options=sorted(df_years["Original Publication Year"].unique()),
         index=0 if len(df_years) else None,
         placeholder="Select a year"
-    )
+        )
 
 if book_data is not None and st.session_state.get("wrapup_ready", False) and selected_year is not None:
-    st.subheader(f"Books published in {selected_year}")
-    # Ensure comparable types (cast column to string before comparing to selected_year)
-    col_year = "Original Publication Year"
-    df_year_filter = books_this_year.copy()
-    df_year_filter[col_year] = pd.to_numeric(df_year_filter[col_year], errors="coerce").astype('Int64').astype(str)
-    df_year_sel = df_year_filter.loc[
-        df_year_filter[col_year] == str(selected_year),
-        ["Title", "Author", col_year, "My Rating"]
-    ].copy()
-    # Ensure integers display without commas
-    df_year_sel["My Rating"] = pd.to_numeric(df_year_sel["My Rating"], errors="coerce").astype('Int64').astype(str)
-    st.write(df_year_sel)
+    with col_books if 'col_books' in locals() and col_books is not None else st:
+        st.subheader(f"Books published in {selected_year}")
+        # Ensure comparable types (cast column to string before comparing to selected_year)
+        col_year = "Original Publication Year"
+        df_year_filter = books_this_year.copy()
+        df_year_filter[col_year] = pd.to_numeric(df_year_filter[col_year], errors="coerce").astype('Int64').astype(str)
+        df_year_sel = df_year_filter.loc[
+            df_year_filter[col_year] == str(selected_year),
+            ["Title", "Author", col_year, "My Rating"]
+        ].copy()
+        # Ensure integers display without commas
+        df_year_sel["My Rating"] = pd.to_numeric(df_year_sel["My Rating"], errors="coerce").astype('Int64').astype(str)
+        st.write(df_year_sel)
 
