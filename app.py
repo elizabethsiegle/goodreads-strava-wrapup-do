@@ -12,41 +12,38 @@ from data.goodreads import clean_books_df, compute_book_stats
 # Load .env file
 load_dotenv()
 
-def render_title():
-    st.markdown(
-        "<h1 style='margin:0'>Goodreads and <span style='color:#f97316'>Strava</span> 2025 Wrap-up</h1>",
-        unsafe_allow_html=True,
-    )
-render_title()
+st.markdown(
+    "<h1 style='margin:0'>Goodreads and <span style='color:#f97316'>Strava</span> 2025 Wrap-up</h1>",
+    unsafe_allow_html=True,
+)
 
 # get yours @ https://cloud.digitalocean.com/gen-ai/model-access-keys
 MODEL_ACCESS_KEY = os.getenv("MODEL_ACCESS_KEY")
 print("MODEL_ACCESS_KEY loaded:",MODEL_ACCESS_KEY)
-def render_intro():
-    st.markdown(
-        (
-            '<div style="margin-bottom: 12px; font-size: 16px; line-height: 1.6;">'
-            'Upload your Strava activities and/or Goodreads library exports to see an analysis and summary of your 2025 activities and reading.</br></br>'
-            'You can <a href="https://www.strava.com/athlete/delete_your_account">export your Strava activities here</a> and <a href="https://www.goodreads.com/review/import">your Goodsreads data here</a>. (You must be logged in to access these links.)'
-            '</div>'
-        ),
-        unsafe_allow_html=True,
-    )
-render_intro()
+# Instructions for uploading files
+st.markdown(
+    (
+        '<div style="margin-bottom: 12px; font-size: 16px; line-height: 1.6;">'
+        'Upload your Strava activities and/or Goodreads library exports to see an analysis and summary of your 2025 activities and reading.</br></br>'
+        'You can <a href="https://www.strava.com/athlete/delete_your_account">export your Strava activities here</a> and <a href="https://www.goodreads.com/review/import">your Goodsreads data here</a>. (You must be logged in to access these links.)'
+        '</div>'
+    ),
+    unsafe_allow_html=True,
+)
 
 # Upload inputs (optional): users can upload one or both files
-def render_uploaders():
-    ug = st.file_uploader('Upload Goodreads library export (.csv)', type=['csv'], accept_multiple_files=False)
-    us = st.file_uploader('Upload Strava activities (.csv)', type=['csv'], accept_multiple_files=False)
-    return ug, us
-uploaded_goodreads, uploaded_strava = render_uploaders()
+uploaded_goodreads = st.file_uploader(
+    'Upload Goodreads library export (.csv)', type=['csv'], accept_multiple_files=False
+)
+uploaded_strava = st.file_uploader(
+    'Upload Strava activities (.csv)', type=['csv'], accept_multiple_files=False
+)
 
 
 # Readability styles
-def inject_styles():
-    st.markdown(
-        """
-        <style>
+st.markdown(
+    """
+    <style>
     /* Base font for readability */
     html, body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1f2937; }
     /* Make Altair chart labels and rendered text larger and more legible */
@@ -147,28 +144,20 @@ def inject_styles():
     .stButton > button:focus-visible { animation: wiggle 0.25s ease-in-out; }
     </style>
     """,
-        unsafe_allow_html=True,
-    )
-inject_styles()
+    unsafe_allow_html=True,
+)
 
-def render_wrapup_button(ug, us):
-    if ug is None and us is None:
-        st.warning("Upload one or both CSV files to begin.")
-        return
+if uploaded_goodreads is None and uploaded_strava is None:
+    st.warning("Upload one or both CSV files to begin.")
+else:
     if "wrapup_ready" not in st.session_state:
         st.session_state.wrapup_ready = False
     if not st.session_state.wrapup_ready:
         if st.button("Generate wrap-up"):
             st.session_state.wrapup_ready = True
-render_wrapup_button(uploaded_goodreads, uploaded_strava)
 
 book_data = pd.read_csv(uploaded_goodreads) if uploaded_goodreads is not None else None
 strava_data = pd.read_csv(uploaded_strava) if uploaded_strava is not None else None
-def load_uploaded_data(ug, us):
-    bd = pd.read_csv(ug) if ug is not None else None
-    sd = pd.read_csv(us) if us is not None else None
-    return bd, sd
-book_data, strava_data = load_uploaded_data(uploaded_goodreads, uploaded_strava)
 
 # Only show filtered 2025 data
 
@@ -439,7 +428,10 @@ if st.session_state.get("wrapup_ready", False):
 
             # LLM-based genre guessing (experimental)
             if has_books and ((isinstance(books_this_year, pd.DataFrame) and len(books_this_year)) or (isinstance(books_clean, pd.DataFrame) and len(books_clean))):
-                def build_genre_paragraph(source_df: pd.DataFrame) -> str:
+                # Cache to avoid repeated calls
+                cache_key = 'guessed_genres_2025'
+                if cache_key not in st.session_state:
+                    source_df = books_this_year if len(books_this_year) else books_clean
                     cols = [c for c in ['Title', 'Author'] if c in (source_df.columns if source_df is not None else [])]
                     sample = source_df[cols].dropna().head(50).to_dict(orient='records') if cols else []
                     prompt_payload = {
@@ -460,120 +452,182 @@ if st.session_state.get("wrapup_ready", False):
                         "max_tokens": 1200,
                         "response_format": {"type": "json_object"}
                     }
+                    resp = requests.post(
+                        "https://inference.do-ai.run/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {MODEL_ACCESS_KEY}", "Content-Type": "application/json"},
+                        json=prompt_payload,
+                        timeout=30,
+                    )
+                res_json = resp.json()
+                msg_obj = res_json.get("choices", [{}])[0].get("message", {})
+                raw = msg_obj.get("content") or msg_obj.get("reasoning_content") or ""
+                print('raw ', raw)
+                # Robust JSON extraction: trim to outermost braces or fenced code block
+                raw_str = str(raw).strip()
+                if '```' in raw_str:
+                    # Attempt to extract content inside first fenced block
+                    fence_start = raw_str.find('```')
+                    fence_end = raw_str.find('```', fence_start + 3)
+                    block = raw_str[fence_start + 3:fence_end] if fence_start != -1 and fence_end != -1 else raw_str
+                    raw_str = block.strip()
+                start = raw_str.find('{')
+                end = raw_str.rfind('}')
+                json_only = raw_str[start:end+1] if start != -1 and end != -1 and end > start else "{}"
+                # Parse JSON; on failure, retry with a lighter prompt, then fallback to heuristic
+                parsed = None
+                try:
+                    parsed = json.loads(json_only)
+                except Exception:
+                    parsed = None
+                if not parsed or not isinstance(parsed, dict):
+                    # Retry without response_format to coax output
+                    retry_payload = {
+                        "model": "openai-gpt-oss-120b",
+                        "messages": [
+                            {"role": "system", "content": "Return only raw JSON. No prose."},
+                            {"role": "user", "content": (
+                                "Return a JSON with keys 'items' (objects: title, author, genre) and 'counts' (genre->count). "
+                                "Valid genres: Fantasy, Sci-Fi, Mystery, Thriller, Romance, Nonfiction, Biography, History, Self-Help, Literary Fiction, Young Adult. "
+                                f"Books: {json.dumps(sample)}"
+                            )}
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": 800
+                    }
                     try:
-                        resp = requests.post(
+                        retry_resp = requests.post(
                             "https://inference.do-ai.run/v1/chat/completions",
                             headers={"Authorization": f"Bearer {MODEL_ACCESS_KEY}", "Content-Type": "application/json"},
-                            json=prompt_payload,
+                            json=retry_payload,
                             timeout=30,
                         )
-                        res_json = resp.json()
-                        msg_obj = res_json.get("choices", [{}])[0].get("message", {})
-                        raw = msg_obj.get("content") or msg_obj.get("reasoning_content") or ""
-                    except Exception:
-                        raw = "{}"
-                    raw_str = str(raw).strip()
-                    if '```' in raw_str:
-                        fence_start = raw_str.find('```')
-                        fence_end = raw_str.find('```', fence_start + 3)
-                        block = raw_str[fence_start + 3:fence_end] if fence_start != -1 and fence_end != -1 else raw_str
-                        raw_str = block.strip()
-                    start = raw_str.find('{')
-                    end = raw_str.rfind('}')
-                    json_only = raw_str[start:end+1] if start != -1 and end != -1 and end > start else "{}"
-                    try:
-                        parsed = json.loads(json_only)
+                        retry_msg = retry_resp.json().get("choices", [{}])[0].get("message", {})
+                        retry_raw = retry_msg.get("content") or retry_msg.get("reasoning_content") or ""
+                        rstr = str(retry_raw)
+                        rs = rstr.find('{')
+                        re = rstr.rfind('}')
+                        robj = rstr[rs:re+1] if rs != -1 and re != -1 and re > rs else "{}"
+                        parsed = json.loads(robj)
                     except Exception:
                         parsed = {"items": [], "counts": {}}
-                    if not parsed.get("items") and not parsed.get("counts"):
-                        items = []
-                        counts = {}
-                        genre_map = {
-                            'fantasy': 'Fantasy', 'dragon': 'Fantasy', 'magic': 'Fantasy',
-                            'sci-fi': 'Sci-Fi', 'science fiction': 'Sci-Fi', 'galaxy': 'Sci-Fi', 'space': 'Sci-Fi',
-                            'mystery': 'Mystery', 'detective': 'Mystery', 'murder': 'Mystery',
-                            'thrill': 'Thriller', 'chase': 'Thriller', 'spy': 'Thriller',
-                            'romance': 'Romance', 'love': 'Romance', 'heart': 'Romance',
-                            'nonfiction': 'Nonfiction', 'essay': 'Nonfiction', 'memoir': 'Biography',
-                            'biography': 'Biography', 'life of': 'Biography',
-                            'history': 'History', 'war': 'History',
-                            'self-help': 'Self-Help', 'habits': 'Self-Help', 'guide': 'Self-Help',
-                            'literary': 'Literary Fiction', 'novel': 'Literary Fiction',
-                            'young adult': 'Young Adult', 'ya': 'Young Adult'
-                        }
-                        if source_df is not None and not source_df.empty:
-                            cols = [c for c in ['Title', 'Author'] if c in source_df.columns]
-                            for _, row in source_df[cols].dropna().head(50).iterrows():
-                                title = str(row.get('Title', '')).lower()
-                                author = str(row.get('Author', ''))
-                                assigned = 'Literary Fiction'
-                                for key, g in genre_map.items():
-                                    if key in title:
-                                        assigned = g
-                                        break
-                                items.append({"title": row.get('Title', ''), "author": author, "genre": assigned})
-                                counts[assigned] = counts.get(assigned, 0) + 1
-                        parsed = {"items": items, "counts": counts}
-                    tops = sorted([(k, v) for k, v in (parsed.get("counts", {}) or {}).items()], key=lambda x: -x[1])[:5]
-                    primary = tops[0][0] if tops else "Literary Fiction"
-                    pcount = int(tops[0][1]) if tops else 0
-                    minor = [t[0] for t in tops[1:3]]
-                    minor_text = ", ".join(minor) if minor else ""
-                    total_books = sum([int(t[1]) for t in tops]) if tops else max(pcount, 1)
-                    shares = {g.lower(): (int(c) / total_books) for g, c in tops} if total_books else {}
-                    top_share = shares.get(primary.lower(), 0.0)
-                    vibe_bits = []
-                    if top_share < 0.3 and total_books >= 5:
-                        vibe_bits.append("Eclectic taste: you sampled widely and often.")
-                    top3 = tops[:3]
-                    if len(top3) == 3:
-                        s1 = int(top3[0][1]) / total_books
-                        s2 = int(top3[1][1]) / total_books
-                        s3 = int(top3[2][1]) / total_books
-                        if s1 >= 0.2 and s2 >= 0.2 and s3 >= 0.2 and (s1 <= 0.4 and s2 <= 0.4 and s3 <= 0.4):
-                            vibe_bits.append("Balanced shelf: evenly split across your top three.")
-                    if shares.get("nonfiction", 0.0) >= 0.6:
-                        vibe_bits.append("Curious, clear-eyed, relentlessly fact-fueled.")
-                    if (shares.get("biography", 0.0) + shares.get("history", 0.0)) >= 0.5:
-                        vibe_bits.append("Lives and eras: biography/history took the spotlight.")
-                    if shares.get("self-help", 0.0) >= 0.35:
-                        vibe_bits.append("Systems, habits, and upgrades—self-help was a theme.")
-                    if shares.get("romance", 0.0) >= 0.4:
-                        vibe_bits.append("Big feelings, bigger heart—romance ruled.")
-                    if shares.get("fantasy", 0.0) >= 0.4:
-                        vibe_bits.append("Portals, prophecies, and plenty of magic.")
-                    if shares.get("sci-fi", 0.0) >= 0.4:
-                        vibe_bits.append("Futures, frontiers, and thought experiments—sci‑fi soared.")
-                    if shares.get("young adult", 0.0) >= 0.4:
-                        vibe_bits.append("YA energy: fast beats, big arcs, high empathy.")
-                    if (shares.get("mystery", 0.0) + shares.get("thriller", 0.0)) >= 0.5:
-                        vibe_bits.append("Twists ahead: you chased clues and adrenaline.")
-                    if not vibe_bits:
-                        if primary.lower() == "nonfiction":
-                            vibe_bits.append("Curious, clear-eyed, and fact-forward.")
-                        else:
-                            if shares.get("literary fiction", 0.0) >= 0.4:
-                                vibe_bits.append("Lyrical turns, quiet stakes, character-first focus.")
-                            else:
-                                vibe_bits.append("Punchy plots, smart prose, self-aware vibes.")
-                    base = f"Your year was {primary.lower()} forward ({pcount}). "
-                    cameo = f"{minor_text} showed up occasionally. " if minor_text else ""
-                    vibe = " ".join(vibe_bits) + " "
-                    wrap = "TBR towering, taste refined—another ‘quiet, luminous’ pick awaits."
-                    paragraph = (base + cameo + vibe + wrap)
-                    words = paragraph.split()
-                    if len(words) > 80:
-                        paragraph = " ".join(words[:80]).rstrip(".,;") + "."
-                    return paragraph
+                # If still empty, build heuristic genres from titles
+                if not parsed.get("items") and not parsed.get("counts"):
+                    src_df = source_df if 'source_df' in locals() and source_df is not None else pd.DataFrame()
+                    items = []
+                    counts = {}
+                    genre_map = {
+                        'fantasy': 'Fantasy', 'dragon': 'Fantasy', 'magic': 'Fantasy',
+                        'sci-fi': 'Sci-Fi', 'science fiction': 'Sci-Fi', 'galaxy': 'Sci-Fi', 'space': 'Sci-Fi',
+                        'mystery': 'Mystery', 'detective': 'Mystery', 'murder': 'Mystery',
+                        'thrill': 'Thriller', 'chase': 'Thriller', 'spy': 'Thriller',
+                        'romance': 'Romance', 'love': 'Romance', 'heart': 'Romance',
+                        'nonfiction': 'Nonfiction', 'essay': 'Nonfiction', 'memoir': 'Biography',
+                        'biography': 'Biography', 'life of': 'Biography',
+                        'history': 'History', 'war': 'History',
+                        'self-help': 'Self-Help', 'habits': 'Self-Help', 'guide': 'Self-Help',
+                        'literary': 'Literary Fiction', 'novel': 'Literary Fiction',
+                        'young adult': 'Young Adult', 'ya': 'Young Adult'
+                    }
+                    if not src_df.empty:
+                        cols = [c for c in ['Title', 'Author'] if c in src_df.columns]
+                        for _, row in src_df[cols].dropna().head(50).iterrows():
+                            title = str(row.get('Title', '')).lower()
+                            author = str(row.get('Author', ''))
+                            assigned = 'Literary Fiction'
+                            for key, g in genre_map.items():
+                                if key in title:
+                                    assigned = g
+                                    break
+                            items.append({"title": row.get('Title', ''), "author": author, "genre": assigned})
+                            counts[assigned] = counts.get(assigned, 0) + 1
+                    parsed = {"items": items, "counts": counts}
+                # Use parsed JSON for the summary input
+                compact_insight = json.dumps({
+                    "top_genres": sorted([(k, v) for k, v in (parsed.get("counts", {}) or {}).items()], key=lambda x: -x[1])[:5],
+                    "samples": (parsed.get("items", []) or [])[:10]
+                })
+                print('compact_insight', compact_insight)
+                # Build a local concise paragraph from compact_insight to avoid API verbosity
+                try:
+                    ci = json.loads(compact_insight)
+                except Exception:
+                    ci = {"top_genres": [], "samples": []}
+                tops = ci.get("top_genres", [])
+                primary = tops[0][0] if tops else "Literary Fiction"
+                pcount = tops[0][1] if tops else 0
+                minor = [t[0] for t in tops[1:3]]
+                minor_text = ", ".join(minor) if minor else ""
 
-                source_df = books_this_year if len(books_this_year) else books_clean
-                genre_paragraph = build_genre_paragraph(source_df)
+                # Compute totals and shares for conditional phrasing
+                total_books = sum([int(t[1]) for t in tops]) if tops else max(pcount, 1)
+                shares = {g.lower(): (int(c) / total_books) for g, c in tops} if total_books else {}
+                top_share = shares.get(primary.lower(), 0.0)
+
+                # Conditional vibe lines based on genre ratios
+                vibe_bits = []
+                # Eclectic: no single genre dominates
+                if top_share < 0.3 and total_books >= 5:
+                    vibe_bits.append("Eclectic taste: you sampled widely and often.")
+                # Balanced top-3: spread across three genres
+                top3 = tops[:3]
+                if len(top3) == 3:
+                    s1 = int(top3[0][1]) / total_books
+                    s2 = int(top3[1][1]) / total_books
+                    s3 = int(top3[2][1]) / total_books
+                    if s1 >= 0.2 and s2 >= 0.2 and s3 >= 0.2 and (s1 <= 0.4 and s2 <= 0.4 and s3 <= 0.4):
+                        vibe_bits.append("Balanced shelf: evenly split across your top three.")
+                # Nonfiction-heavy
+                if shares.get("nonfiction", 0.0) >= 0.6:
+                    vibe_bits.append("Curious, clear-eyed, relentlessly fact-fueled.")
+                # Biography/History heavy
+                if (shares.get("biography", 0.0) + shares.get("history", 0.0)) >= 0.5:
+                    vibe_bits.append("Lives and eras: biography/history took the spotlight.")
+                # Self-Help heavy
+                if shares.get("self-help", 0.0) >= 0.35:
+                    vibe_bits.append("Systems, habits, and upgrades—self-help was a theme.")
+                # Romance-heavy
+                if shares.get("romance", 0.0) >= 0.4:
+                    vibe_bits.append("Big feelings, bigger heart—romance ruled.")
+                # Fantasy-heavy
+                if shares.get("fantasy", 0.0) >= 0.4:
+                    vibe_bits.append("Portals, prophecies, and plenty of magic.")
+                # Sci-Fi heavy
+                if shares.get("sci-fi", 0.0) >= 0.4:
+                    vibe_bits.append("Futures, frontiers, and thought experiments—sci‑fi soared.")
+                # YA heavy
+                if shares.get("young adult", 0.0) >= 0.4:
+                    vibe_bits.append("YA energy: fast beats, big arcs, high empathy.")
+                # Mystery/Thriller edge
+                if (shares.get("mystery", 0.0) + shares.get("thriller", 0.0)) >= 0.5:
+                    vibe_bits.append("Twists ahead: you chased clues and adrenaline.")
+                # Default literary/fiction vibe
+                if not vibe_bits:
+                    if primary.lower() == "nonfiction":
+                        vibe_bits.append("Curious, clear-eyed, and fact-forward.")
+                    else:
+                        # Literary/fiction-heavy nuance
+                        if shares.get("literary fiction", 0.0) >= 0.4:
+                            vibe_bits.append("Lyrical turns, quiet stakes, character-first focus.")
+                        else:
+                            vibe_bits.append("Punchy plots, smart prose, self-aware vibes.")
+
+                # Compose concise paragraph under ~80 words
+                base = f"Your year was {primary.lower()} forward ({pcount}). "
+                cameo = f"{minor_text} showed up occasionally. " if minor_text else ""
+                vibe = " ".join(vibe_bits) + " "
+                wrap = "TBR towering, taste refined—another ‘quiet, luminous’ pick awaits."
+                genre_resp_json = (base + cameo + vibe + wrap)
+                # Hard cap ~80 words
+                words = genre_resp_json.split()
+                if len(words) > 80:
+                    genre_resp_json = " ".join(words[:80]).rstrip(".,;") + "."
+                print('genre_resp_json', genre_resp_json)
                 st.markdown(
                     f"""
                     <div class='wrapup-card'>
                         <div class='wrapup-header'><span class='wrapup-badge'>Genres</span><h3 style='margin:0;'>Estimated Flavor</h3></div>
                         <hr class='wrapup-card-divider' />
-                        <p>{genre_paragraph}</p>
+                        <p>{genre_resp_json}</p>
                     </div>
                     """,
                     unsafe_allow_html=True,
