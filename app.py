@@ -1,15 +1,3 @@
-"""
-Streamlit App: Goodreads and Strava 2025 Wrap-up
-
-Structure
-- Imports & setup
-- File upload & gating
-- Data cleaning & stats (via data modules)
-- Layout (columns)
-- Visualizations (books/strava)
-- LLM wrap-ups
-"""
-
 import altair as alt
 from dotenv import load_dotenv
 import os
@@ -18,7 +6,7 @@ import requests
 import json
 import pandas as pd
 import streamlit as st
-from data.strava import clean_workouts_df, compute_workout_stats
+from data.strava import clean_workouts_df, compute_workout_stats, compute_daily_steps_2025
 from data.goodreads import clean_books_df, compute_book_stats
 
 # Load .env file
@@ -31,7 +19,7 @@ st.markdown(
 
 # get yours @ https://cloud.digitalocean.com/gen-ai/model-access-keys
 MODEL_ACCESS_KEY = os.getenv("MODEL_ACCESS_KEY")
-
+print("MODEL_ACCESS_KEY loaded:",MODEL_ACCESS_KEY)
 # Instructions for uploading files
 st.markdown(
     (
@@ -51,7 +39,6 @@ uploaded_strava = st.file_uploader(
     'Upload Strava activities (.csv)', type=['csv'], accept_multiple_files=False
 )
 
-# Helpers moved to data modules: data/strava.py, data/goodreads.py
 
 # Readability styles
 st.markdown(
@@ -202,6 +189,24 @@ workouts_this_year = (
 )
 workout_stats = compute_workout_stats(workouts_this_year) if has_strava else {}
 
+# Precompute steps summary once (used by LLM and charts)
+steps_source_df = None
+if has_strava and isinstance(workouts_this_year, pd.DataFrame) and 'Total Steps' in workouts_this_year.columns:
+    steps_source_df = workouts_this_year.copy()
+else:
+    csv_path = os.path.join(os.getcwd(), 'data_csvs', 'activities.csv')
+    if os.path.exists(csv_path):
+        try:
+            steps_source_df = pd.read_csv(csv_path)
+        except Exception:
+            steps_source_df = None
+
+daily_steps = compute_daily_steps_2025(steps_source_df) if isinstance(steps_source_df, pd.DataFrame) else pd.DataFrame()
+steps_summary = {
+    'days_with_steps': int(len(daily_steps)) if len(daily_steps) else 0,
+    'total_steps': int(pd.to_numeric(daily_steps['Steps']).sum()) if len(daily_steps) else 0,
+}
+
 # Build Strava activity links from Filename (strip .gpx)
 if has_strava and not workouts_this_year.empty:
     # Prefer Activity ID when available; fallback to Filename-derived ID
@@ -220,187 +225,134 @@ if has_strava and not workouts_this_year.empty:
         final_ids = pd.Series([], dtype=str)
     workouts_this_year['Link'] = 'https://www.strava.com/activities/' + final_ids
 
-# Render wrap-up cards BEFORE visualizations
+def _build_strava_sample(workouts_df: pd.DataFrame) -> list:
+    df = workouts_df.head(10).copy()
+    if len(df) and 'Activity Date' in df.columns:
+        df['Activity Date'] = df['Activity Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    ids = None
+    if 'Activity ID' in df.columns:
+        ids = pd.to_numeric(df['Activity ID'], errors='coerce').astype('Int64').astype(str)
+    elif 'Filename' in df.columns:
+        fn = df['Filename'].astype(str)
+        fn = fn.str.replace('.gpx', '', regex=False)
+        fn = fn.str.replace('.fit.gz', '', regex=False)
+        ids = fn.str.replace(r'\D', '', regex=True)
+    if ids is not None:
+        df['Link'] = 'https://www.strava.com/activities/' + ids
+    return df.to_dict(orient='records') if len(df) else []
+
+def _build_books_sample(books_df: pd.DataFrame) -> list:
+    if not isinstance(books_df, pd.DataFrame) or not len(books_df):
+        return []
+    b = books_df.head(10).copy()
+    if 'Date Read' in b.columns:
+        b['Date Read'] = pd.to_datetime(b['Date Read'], errors='coerce').dt.strftime('%Y-%m-%d')
+    return b.to_dict(orient='records')
+
+def _call_wrapup_api(title: str, messages: list, max_tokens: int = 800) -> str:
+    url = "https://inference.do-ai.run/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {MODEL_ACCESS_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "openai-gpt-oss-120b", "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
+    with st.spinner(f"Generating {title}…"):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=45)
+        except Exception as e:
+            st.error(f"Wrap-up request failed: {e}")
+            return ""
+    if resp.status_code != 200:
+        st.error(f"Wrap-up API error {resp.status_code}: {resp.text}")
+        return ""
+    try:
+        data = resp.json()
+    except Exception:
+        st.error("Wrap-up API returned non-JSON response.")
+        return ""
+    text = (data.get("choices", [{}])[0].get('message', {}) or {}).get("content", "")
+    if not text:
+        st.warning("No wrap-up text returned. Showing raw response for debugging.")
+        st.code(json.dumps(data, indent=2)[:6000])
+    return text
+
+# Render wrap-up cards BEFORE visualizations (simplified)
 if st.session_state.get("wrapup_ready", False):
-    # Strava-only wrap-up
     if has_strava and not has_books:
-        url = "https://inference.do-ai.run/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {MODEL_ACCESS_KEY}",
-            "Content-Type": "application/json"
-        }
-        stats_json = json.dumps(workout_stats)
-        sample_df = workouts_this_year.head(10).copy()
-        if len(sample_df) and 'Activity Date' in sample_df.columns:
-            sample_df['Activity Date'] = sample_df['Activity Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        # Add Strava activity links from Filename (without .gpx)
-        # Build links for samples: prefer Activity ID, fallback to Filename-derived ID
-        ids = None
-        if 'Activity ID' in sample_df.columns:
-            ids = pd.to_numeric(sample_df['Activity ID'], errors='coerce').astype('Int64').astype(str)
-        elif 'Filename' in sample_df.columns:
-            fn = sample_df['Filename'].astype(str)
-            fn = fn.str.replace('.gpx', '', regex=False)
-            fn = fn.str.replace('.fit.gz', '', regex=False)
-            ids = fn.str.replace(r'\D', '', regex=True)
-        if ids is not None:
-            sample_df['Link'] = 'https://www.strava.com/activities/' + ids
-        sample_records = sample_df.to_dict(orient='records') if len(sample_df) else []
-        sample_json = json.dumps(sample_records)
-        data = {
-            "model": "openai-gpt-oss-120b",
-            "messages": [
-                {"role": "user", "content": (
-                    "Generate a 2025 year-end wrap-up for the user based on their Strava workouts. "
-                    "Use the exact numeric stats provided (do not make up numbers). "
-                    "Highlight totals, per-activity-type distances, longest activity, elevation gain, heart rate, and calories. "
-                    "When referencing specific activities, include the provided Strava link using Markdown format [link](url). "
-                    "Write in a funny, friendly, engaging tone.\n\n"
-                    f"Stats: {stats_json}\n"
-                    f"Sample workouts (up to 10): {sample_json}"
-                )},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 512
-        }
-        with st.spinner("Generating Strava wrap-up…"):
-            response = requests.post(url, headers=headers, json=data)
-        wrapup_text = response.json().get("choices", [{}])[0].get('message', {}).get("content", "")
-        if wrapup_text:
-            st.markdown(
-                f"""
-                <div class='wrapup-card'>
-                  <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Strava Summary</h3></div>
-                  <hr class='wrapup-card-divider' />
-                  {wrapup_text}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.text_area("Copy & share", value=wrapup_text, height=240)
-            st.download_button("Download wrap-up text", data=wrapup_text, file_name="2025-wrapup-strava.txt")
+        stats_json = json.dumps({**workout_stats, 'steps_summary': steps_summary})
+        sample_json = json.dumps(_build_strava_sample(workouts_this_year))
+        messages = [{"role": "user", "content": (
+            "Generate a 2025 year-end wrap-up for the user based on their Strava workouts. "
+            "Use the exact numeric stats provided (do not make up numbers). "
+            "Highlight totals, per-activity-type distances, longest activity, elevation gain, heart rate, and calories. "
+            "Also include the steps summary (total steps and number of days with steps) from 'steps_summary'. "
+            "When referencing specific activities, include the provided Strava link using Markdown format [link](url). "
+            "Write in a funny, friendly, engaging tone.\n\n"
+            f"Stats (including steps_summary): {stats_json}\n"
+            f"Sample workouts (up to 10): {sample_json}"
+        )}]
+        text = _call_wrapup_api("Strava wrap-up", messages, max_tokens=700)
+        if text:
+            st.markdown(f"""
+            <div class='wrapup-card'>
+            <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Strava Summary</h3></div>
+            <hr class='wrapup-card-divider' />
+            {text}
+            </div>
+            """, unsafe_allow_html=True)
+            st.text_area("Copy & share", value=text, height=240)
+            st.download_button("Download wrap-up text", data=text, file_name="2025-wrapup-strava.txt")
 
-    # Goodreads-only wrap-up
     if has_books and not has_strava:
-        url = "https://inference.do-ai.run/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {MODEL_ACCESS_KEY}",
-            "Content-Type": "application/json"
-        }
-        book_stats_json = json.dumps(book_stats if 'book_stats' in locals() else {})
-        # Ensure datetime-like columns are stringified for JSON
-        if len(books_this_year):
-            bsample = books_this_year.head(10).copy()
-            for col in ["Date Read"]:
-                if col in bsample.columns:
-                    # Convert pandas Timestamp to ISO-like string
-                    bsample[col] = pd.to_datetime(bsample[col], errors='coerce').dt.strftime('%Y-%m-%d')
-            book_sample = bsample.to_dict(orient='records')
-        else:
-            book_sample = []
-        book_sample_json = json.dumps(book_sample)
-        data = {
-            "model": "openai-gpt-oss-120b",
-            "messages": [
-                {"role": "user", "content": (
-                    "Generate a 2025 year-end reading wrap-up. Use the exact stats provided (do not make up numbers). "
-                    "Summarize total books, average rating, total pages, longest book, top authors, and notable highlights. "
-                    "Write in a funny, friendly, engaging tone. Use human-friendly book titles and author names; do NOT mention internal IDs.\n\n"
-                    f"Book stats: {book_stats_json}\n"
-                    f"Sample books (up to 10): {book_sample_json}"
-                )},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 512
-        }
-        with st.spinner("Generating Goodreads wrap-up…"):
-            response = requests.post(url, headers=headers, json=data)
-        wrapup_text = response.json().get("choices", [{}])[0].get('message', {}).get("content", "")
-        if wrapup_text:
-            st.markdown(
-                f"""
-                <div class='wrapup-card'>
-                  <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Goodreads Summary</h3></div>
-                  <hr class='wrapup-card-divider' />
-                  {wrapup_text}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.text_area("Copy & share", value=wrapup_text, height=240)
-            st.download_button("Download wrap-up text", data=wrapup_text, file_name="2025-wrapup-books.txt")
-
-    # Combined wrap-up when both files are present
-    if has_books and has_strava:
-        url = "https://inference.do-ai.run/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {MODEL_ACCESS_KEY}",
-            "Content-Type": "application/json"
-        }
-        stats_json = json.dumps(workout_stats)
-        sample_df = workouts_this_year.head(10).copy()
-        if len(sample_df) and 'Activity Date' in sample_df.columns:
-            sample_df['Activity Date'] = sample_df['Activity Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        ids = None
-        if 'Activity ID' in sample_df.columns:
-            ids = pd.to_numeric(sample_df['Activity ID'], errors='coerce').astype('Int64').astype(str)
-        elif 'Filename' in sample_df.columns:
-            fn = sample_df['Filename'].astype(str)
-            fn = fn.str.replace('.gpx', '', regex=False)
-            fn = fn.str.replace('.fit.gz', '', regex=False)
-            ids = fn.str.replace(r'\D', '', regex=True)
-        if ids is not None:
-            sample_df['Link'] = 'https://www.strava.com/activities/' + ids
-        sample_records = sample_df.to_dict(orient='records') if len(sample_df) else []
-        sample_json = json.dumps(sample_records)
         book_stats_json = json.dumps(book_stats)
-        # Ensure datetime-like columns are stringified for JSON
-        if len(books_this_year):
-            bsample = books_this_year.head(10).copy()
-            for col in ["Date Read"]:
-                if col in bsample.columns:
-                    bsample[col] = pd.to_datetime(bsample[col], errors='coerce').dt.strftime('%Y-%m-%d')
-            book_sample = bsample.to_dict(orient='records')
-        else:
-            book_sample = []
-        book_sample_json = json.dumps(book_sample)
-        data = {
-            "model": "openai-gpt-oss-120b",
-            "messages": [
-                {"role": "user", "content": (
-                    "Generate a 2025 year-end wrap-up for Strava + Goodreads in the humorous, succinct, slightly deprecating manner of Spotify Wrapups. "
-                    "Use the exact stats provided (do not make up numbers). "
-                    "For Strava: summarize total distance, workout count, per-type distances, longest activity, elevation, heart rate, calories."
-                    "For books: summarize total read, average rating, total pages, longest book, top authors, and highlights."
-                    "Write in a funny, friendly, engaging tone. Use human-friendly book titles and author names; do NOT mention internal IDs.\n\n"
-                    "Make comparisons about trends, improvements, or interesting observations between the reading and workout data. What author was most popular? Or workout type, if only one is present?\n\n"
-                    "Split up some of the sections into Strava-specific and Goodreads-specific paragraphs for clarity. Make it like a Spotify Wrapped--how many total pages were read? How many total miles were ridden or run?\n\n"
-                    "When referencing specific Strava activities (e.g., a max heart rate event), include the provided Strava link using Markdown format [link](url).\n\n"
-                    f"Strava stats: {stats_json}\n"
-                    f"Strava sample (up to 10): {sample_json}\n"
-                    f"Book stats: {book_stats_json}\n"
-                    f"Book sample (up to 10): {book_sample_json}"
-                )},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 5000
-        }
-        with st.spinner("Generating combined wrap-up…"):
-            response = requests.post(url, headers=headers, json=data)
-        wrapup_text = response.json().get("choices", [{}])[0].get('message', {}).get("content", "")
-        if wrapup_text:
-            st.markdown(
-                f"""
-                <div class='wrapup-card'>
-                  <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Combined Summary</h3></div>
-                  <hr class='wrapup-card-divider' />
-                  {wrapup_text}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.text_area("Copy & share", value=wrapup_text, height=240)
-            st.download_button("Download wrap-up text", data=wrapup_text, file_name="2025-wrapup.txt")
+        book_sample_json = json.dumps(_build_books_sample(books_this_year))
+        messages = [{"role": "user", "content": (
+            "Generate a 2025 year-end reading wrap-up. Use the exact stats provided (do not make up numbers). "
+            "Summarize total books, average rating, total pages, longest book, top authors, and notable highlights. "
+            "Write in a funny, friendly, engaging tone. Use human-friendly book titles and author names; do NOT mention internal IDs.\n\n"
+            f"Book stats: {book_stats_json}\n"
+            f"Sample books (up to 10): {book_sample_json}"
+        )}]
+        text = _call_wrapup_api("Goodreads wrap-up", messages, max_tokens=700)
+        if text:
+            st.markdown(f"""
+            <div class='wrapup-card'>
+            <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Goodreads Summary</h3></div>
+            <hr class='wrapup-card-divider' />
+            {text}
+            </div>
+            """, unsafe_allow_html=True)
+            st.text_area("Copy & share", value=text, height=240)
+            st.download_button("Download wrap-up text", data=text, file_name="2025-wrapup-books.txt")
+
+    if has_books and has_strava:
+        stats_json = json.dumps({**workout_stats, 'steps_summary': steps_summary})
+        sample_json = json.dumps(_build_strava_sample(workouts_this_year))
+        book_stats_json = json.dumps(book_stats)
+        book_sample_json = json.dumps(_build_books_sample(books_this_year))
+        messages = [{"role": "user", "content": (
+            "Generate a 2025 year-end wrap-up for Strava + Goodreads in the humorous, succinct, slightly deprecating manner of Spotify Wrapups. "
+            "Use the exact stats provided (do not make up numbers). "
+            "For Strava: summarize total distance, workout count, per-type distances, longest activity, elevation, heart rate, calories. "
+            "Also include the steps summary (total steps and number of days with steps) from 'steps_summary'. "
+            "For books: summarize total read, average rating, total pages, longest book, top authors, and highlights. "
+            "Write in a funny, friendly, engaging tone. Use human-friendly book titles and author names; do NOT mention internal IDs.\n\n"
+            "Make comparisons about trends, improvements, or interesting observations between the reading and workout data. What author was most popular? Or workout type, if only one is present?\n\n"
+            "Split up some of the sections into Strava-specific and Goodreads-specific paragraphs for clarity. Make it like a Spotify Wrapped--how many total pages were read? How many total miles were ridden or run?\n\n"
+            "When referencing specific Strava activities (e.g., a max heart rate event), include the provided Strava link using Markdown format [link](url).\n\n"
+            f"Strava stats (including steps_summary): {stats_json}\n"
+            f"Strava sample (up to 10): {sample_json}\n"
+            f"Book stats: {book_stats_json}\n"
+            f"Book sample (up to 10): {book_sample_json}"
+        )}]
+        text = _call_wrapup_api("combined wrap-up", messages, max_tokens=2000)
+        if text:
+            st.markdown(f"""
+            <div class='wrapup-card'>
+            <div class='wrapup-header'><span class='wrapup-badge'>2025 Wrap-up</span><h3 style='margin:0;'>Combined Summary</h3></div>
+            <hr class='wrapup-card-divider' />
+            {text}
+            </div>
+            """, unsafe_allow_html=True)
+            st.text_area("Copy & share", value=text, height=240)
+            st.download_button("Download wrap-up text", data=text, file_name="2025-wrapup.txt")
 
 # Layout: two columns if both CSVs, centered single if one 
 if st.session_state.get("wrapup_ready", False):
@@ -616,9 +568,23 @@ if st.session_state.get("wrapup_ready", False):
                 # Eclectic: no single genre dominates
                 if top_share < 0.3 and total_books >= 5:
                     vibe_bits.append("Eclectic taste: you sampled widely and often.")
+                # Balanced top-3: spread across three genres
+                top3 = tops[:3]
+                if len(top3) == 3:
+                    s1 = int(top3[0][1]) / total_books
+                    s2 = int(top3[1][1]) / total_books
+                    s3 = int(top3[2][1]) / total_books
+                    if s1 >= 0.2 and s2 >= 0.2 and s3 >= 0.2 and (s1 <= 0.4 and s2 <= 0.4 and s3 <= 0.4):
+                        vibe_bits.append("Balanced shelf: evenly split across your top three.")
                 # Nonfiction-heavy
                 if shares.get("nonfiction", 0.0) >= 0.6:
                     vibe_bits.append("Curious, clear-eyed, relentlessly fact-fueled.")
+                # Biography/History heavy
+                if (shares.get("biography", 0.0) + shares.get("history", 0.0)) >= 0.5:
+                    vibe_bits.append("Lives and eras: biography/history took the spotlight.")
+                # Self-Help heavy
+                if shares.get("self-help", 0.0) >= 0.35:
+                    vibe_bits.append("Systems, habits, and upgrades—self-help was a theme.")
                 # Romance-heavy
                 if shares.get("romance", 0.0) >= 0.4:
                     vibe_bits.append("Big feelings, bigger heart—romance ruled.")
@@ -627,33 +593,23 @@ if st.session_state.get("wrapup_ready", False):
                     vibe_bits.append("Portals, prophecies, and plenty of magic.")
                 # Sci-Fi heavy
                 if shares.get("sci-fi", 0.0) >= 0.4:
-                    vibe_bits.append("Bold ideas, cosmic stakes—sci‑fi led the way.")
+                    vibe_bits.append("Futures, frontiers, and thought experiments—sci‑fi soared.")
+                # YA heavy
+                if shares.get("young adult", 0.0) >= 0.4:
+                    vibe_bits.append("YA energy: fast beats, big arcs, high empathy.")
                 # Mystery/Thriller edge
                 if (shares.get("mystery", 0.0) + shares.get("thriller", 0.0)) >= 0.5:
                     vibe_bits.append("Twists ahead: you chased clues and adrenaline.")
-                # Young Adult heavy
-                if shares.get("young adult", 0.0) >= 0.4:
-                    vibe_bits.append("Coming‑of‑age arcs and high‑octane heart.")
-                # Biography/History tilt
-                if (shares.get("biography", 0.0) + shares.get("history", 0.0)) >= 0.5:
-                    vibe_bits.append("Lives and eras took center stage.")
-                # Self-Help tilt
-                if shares.get("self-help", 0.0) >= 0.4:
-                    vibe_bits.append("Habits, frameworks, and marginal gains.")
-                # Literary Fiction tilt
-                if shares.get("literary fiction", 0.0) >= 0.4:
-                    vibe_bits.append("Quiet intensity, character‑driven nuance.")
-                # Balanced top three (each between ~20–35%)
-                if len(tops) >= 3:
-                    top3_shares = [shares.get(tops[i][0].lower(), 0.0) for i in range(3)]
-                    if all(0.2 <= s <= 0.35 for s in top3_shares):
-                        vibe_bits.append("Balanced palette—no single genre hogged the spotlight.")
                 # Default literary/fiction vibe
                 if not vibe_bits:
                     if primary.lower() == "nonfiction":
                         vibe_bits.append("Curious, clear-eyed, and fact-forward.")
                     else:
-                        vibe_bits.append("Punchy plots, smart prose, self-aware vibes.")
+                        # Literary/fiction-heavy nuance
+                        if shares.get("literary fiction", 0.0) >= 0.4:
+                            vibe_bits.append("Lyrical turns, quiet stakes, character-first focus.")
+                        else:
+                            vibe_bits.append("Punchy plots, smart prose, self-aware vibes.")
 
                 # Compose concise paragraph under ~80 words
                 base = f"Your year was {primary.lower()} forward ({pcount}). "
@@ -697,10 +653,15 @@ if st.session_state.get("wrapup_ready", False):
             )
             # Render a linked list of recent activities with names as the clickable text
             if 'Link' in df_display.columns and 'Activity Name' in workouts_this_year.columns:
-                preview = workouts_this_year.head(10)[['Activity Name']].copy()
-                preview['Link'] = workouts_this_year.head(10)['Link']
+                # Sort by most recent activity date and then take top 10
+                preview_df = workouts_this_year.sort_values('Activity Date', ascending=False).head(10)
+                preview = preview_df[['Activity Name', 'Activity Date']].copy()
+                preview['Link'] = preview_df['Link']
+                # Format dates as YYYY-MM-DD
+                if 'Activity Date' in preview.columns:
+                    preview['Date'] = preview['Activity Date'].dt.strftime('%Y-%m-%d')
                 linked_lines = "\n".join(
-                    [f"- [" + str(row['Activity Name']) + "](" + str(row['Link']) + ")" for _, row in preview.iterrows()]
+                    [f"- [" + str(row['Activity Name']) + "](" + str(row['Link']) + ") — " + str(row.get('Date', '')) for _, row in preview.iterrows()]
                 )
                 st.markdown("Recent activities:" + "\n" + linked_lines)
             st.markdown("</div>", unsafe_allow_html=True)
@@ -850,7 +811,7 @@ if strava_data is not None and st.session_state.get("wrapup_ready", False):
         charts.append(
             alt.Chart(agg).mark_line(point=True, color='#ef4444').encode(
                 x=alt.X('Month:N', title='Month'),
-                y=alt.Y('elev_gain_m:Q', title='Elev Gain (m)'),
+                y=alt.Y('elev_gain_m:Q', title='Elev Gain (m)', axis=alt.Axis(format='d')),
                 tooltip=[alt.Tooltip('Month:N'), alt.Tooltip('elev_gain_m:Q', title='m')]
             ).properties(title='Elevation Gain (m)', height=220)
         )
@@ -860,6 +821,112 @@ if strava_data is not None and st.session_state.get("wrapup_ready", False):
             use_container_width=True
         )
         st.markdown("</div>", unsafe_allow_html=True)
+
+if st.session_state.get("wrapup_ready", False):
+    # Steps section: derive from uploaded Strava or local CSV fallback
+    if isinstance(steps_source_df, pd.DataFrame) and len(steps_source_df) and ('Activity Date' in steps_source_df.columns and 'Total Steps' in steps_source_df.columns):
+        # daily_steps already computed above
+        if len(daily_steps):
+            st.markdown("<div class='section-strava'>", unsafe_allow_html=True)
+            st.subheader('Steps in 2025')
+            st.caption(f"Days: {len(daily_steps)} • Total steps: {int(pd.to_numeric(daily_steps['Steps']).sum()):,}")
+
+            view = st.radio('View', options=['Daily', 'Weekly', '7-day Avg', 'Daily + 7-day Avg'], index=0, horizontal=True)
+
+            # Weekly aggregation prepared once
+            wk = daily_steps.copy()
+            wk['DateParsed'] = pd.to_datetime(wk['Date'], errors='coerce')
+            wk = wk.dropna(subset=['DateParsed'])
+            iso = wk['DateParsed'].dt.isocalendar()
+            wk['ISOYear'] = iso.year.astype(int)
+            wk['ISOWeek'] = iso.week.astype(int)
+            weekly = (
+                wk.groupby(['ISOYear', 'ISOWeek'])['Steps'].sum().astype(int).reset_index()
+            )
+            weekly['Label'] = weekly['ISOYear'].astype(str) + '-W' + weekly['ISOWeek'].astype(str)
+
+            if view == 'Daily':
+                daily_chart = (
+                    alt.Chart(daily_steps)
+                    .mark_bar(color='#0ea5e9')
+                    .encode(
+                        x=alt.X('Date:N', title='Date'),
+                        y=alt.Y('Steps:Q', title='Steps', axis=alt.Axis(format='d')),
+                        tooltip=[alt.Tooltip('Date:N', title='Date'), alt.Tooltip('Steps:Q', title='Steps', format='d')]
+                    )
+                    .properties(height=420, title='Daily Steps (2025)')
+                )
+
+                st.altair_chart(
+                    daily_chart.configure_axis(labelFontSize=14, titleFontSize=14),
+                    use_container_width=True
+                )
+            elif view == 'Weekly':
+                weekly_chart = (
+                    alt.Chart(weekly)
+                    .mark_bar(color='#10b981')
+                    .encode(
+                        x=alt.X('Label:N', title='ISO Week'),
+                        y=alt.Y('Steps:Q', title='Steps', axis=alt.Axis(format='d')),
+                        tooltip=[alt.Tooltip('Label:N', title='Week'), alt.Tooltip('Steps:Q', title='Steps', format='d')]
+                    )
+                    .properties(height=360, title='Weekly Steps (2025)')
+                )
+
+                st.altair_chart(
+                    weekly_chart.configure_axis(labelFontSize=14, titleFontSize=14),
+                    use_container_width=True
+                )
+            else:
+                # 7-day rolling average line chart
+                roll = daily_steps.copy()
+                roll['DateParsed'] = pd.to_datetime(roll['Date'], errors='coerce')
+                roll = roll.dropna(subset=['DateParsed']).sort_values('DateParsed')
+                roll['Rolling7'] = pd.to_numeric(roll['Steps'], errors='coerce').rolling(7, min_periods=1).mean().round(0).astype(int)
+                if view == '7-day Avg':
+                    avg_chart = (
+                        alt.Chart(roll)
+                        .mark_line(point=True, color='#7c3aed')
+                        .encode(
+                            x=alt.X('Date:N', title='Date'),
+                            y=alt.Y('Rolling7:Q', title='7-day Avg Steps', axis=alt.Axis(format='d')),
+                            tooltip=[alt.Tooltip('Date:N', title='Date'), alt.Tooltip('Rolling7:Q', title='Avg', format='d')]
+                        )
+                        .properties(height=420, title='7-day Average Steps (2025)')
+                    )
+
+                    st.altair_chart(
+                        avg_chart.configure_axis(labelFontSize=14, titleFontSize=14),
+                        use_container_width=True
+                    )
+                else:
+                    # Overlay: daily bars + 7-day average line
+                    daily_chart = (
+                        alt.Chart(daily_steps)
+                        .mark_bar(color='#0ea5e9', opacity=0.7)
+                        .encode(
+                            x=alt.X('Date:N', title='Date'),
+                            y=alt.Y('Steps:Q', title='Steps', axis=alt.Axis(format='d')),
+                            tooltip=[alt.Tooltip('Date:N', title='Date'), alt.Tooltip('Steps:Q', title='Steps', format='d')]
+                        )
+                        .properties(height=420)
+                    )
+                    avg_line = (
+                        alt.Chart(roll)
+                        .mark_line(point=True, color='#7c3aed')
+                        .encode(
+                            x=alt.X('Date:N', title='Date'),
+                            y=alt.Y('Rolling7:Q', title='Steps / 7-day Avg', axis=alt.Axis(format='d')),
+                            tooltip=[alt.Tooltip('Date:N', title='Date'), alt.Tooltip('Rolling7:Q', title='Avg', format='d')]
+                        )
+                        .properties(title='Daily Steps + 7-day Average (2025)')
+                    )
+
+                    st.altair_chart(
+                        (daily_chart + avg_line).configure_axis(labelFontSize=14, titleFontSize=14),
+                        use_container_width=True
+                    )
+            st.markdown("</div>", unsafe_allow_html=True)
 
 # Removed redundant empty section-books wrapper
 

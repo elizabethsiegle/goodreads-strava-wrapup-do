@@ -133,3 +133,42 @@ def compute_workout_stats(df: pd.DataFrame) -> dict:
         'by_type_counts': by_type_counts,
         'by_type_distance_miles': by_type_distance_miles,
     }
+
+
+def compute_daily_steps_2025(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame with daily total steps for 2025.
+
+    Expects a DataFrame containing a date column and a steps column.
+    The result has columns: 'Date' (YYYY-MM-DD string) and 'Steps' (int).
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=['Date', 'Steps'])
+
+    # Expect specific columns per request
+    if 'Activity Date' not in df.columns or 'Total Steps' not in df.columns:
+        return pd.DataFrame(columns=['Date', 'Steps'])
+
+    # Parse dates robustly: try Strava export format first, then fallback
+    dates = pd.to_datetime(
+        df['Activity Date'], format='%b %d, %Y, %I:%M:%S %p', errors='coerce'
+    )
+    if dates.isna().all():
+        dates = pd.to_datetime(df['Activity Date'], errors='coerce')
+    steps_col = 'Total Steps'
+
+    steps = pd.to_numeric(df[steps_col], errors='coerce').fillna(0)
+
+    tmp = pd.DataFrame({'Date': dates.dt.date, 'Steps': steps})
+    tmp = tmp.dropna(subset=['Date'])
+    # Filter to 2025
+    tmp = tmp[(pd.to_datetime(tmp['Date']).dt.year == 2025)]
+    # Group by date and sum steps
+    out = (
+        tmp.groupby('Date', dropna=False)['Steps']
+        .sum()
+        .astype(int)
+        .reset_index()
+    )
+    # Ensure Date as ISO string for display consistency
+    out['Date'] = pd.to_datetime(out['Date']).dt.strftime('%Y-%m-%d')
+    return out
