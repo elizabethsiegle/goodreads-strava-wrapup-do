@@ -44,6 +44,10 @@ uploaded_strava = st.file_uploader(
 st.markdown(
     """
     <style>
+    /* Hide the settings menu */
+    .stDeployButton {display:none;}
+    footer {visibility: hidden;}
+    .stApp > header {visibility: hidden;}
     /* Base font for readability */
     html, body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1f2937; }
     /* Make Altair chart labels and rendered text larger and more legible */
@@ -142,6 +146,35 @@ st.markdown(
         75% { transform: rotate(-0.6deg); }
     }
     .stButton > button:focus-visible { animation: wiggle 0.25s ease-in-out; }
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        background-color: #0e1117;
+        color: white;
+        text-align: center;
+        padding: 10px 0;
+        border-top: 1px solid #262730;
+        z-index: 1000;
+        font-size: 14px;
+    }
+    
+    .footer a {
+        color: #ff6b6b;
+        text-decoration: none;
+        font-weight: 500;
+    }
+    
+    .footer a:hover {
+        color: #ff5252;
+        text-decoration: underline;
+    }
+    
+    /* Ensure content doesn't get hidden behind footer */
+    .stApp {
+        margin-bottom: 60px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1065,4 +1098,9 @@ if book_data is not None and st.session_state.get("wrapup_ready", False) and sel
         df_year_sel["My Rating"] = pd.to_numeric(df_year_sel["My Rating"], errors="coerce").astype('Int64').astype(str)
         st.write(df_year_sel)
         st.markdown("</div>", unsafe_allow_html=True)
-
+# Custom sticky footer
+st.markdown("""
+<div class="footer">
+    made with <3 in sf | <a href="https://github.com/elizabethsiegle/goodreads-strava-wrapup-do" target="_blank">View on GitHub</a>
+</div>
+""", unsafe_allow_html=True)
