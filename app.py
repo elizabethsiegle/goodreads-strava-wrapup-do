@@ -252,7 +252,7 @@ def _build_books_sample(books_df: pd.DataFrame) -> list:
 def _call_wrapup_api(title: str, messages: list, max_tokens: int = 800) -> str:
     url = "https://inference.do-ai.run/v1/chat/completions"
     headers = {"Authorization": f"Bearer {MODEL_ACCESS_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "openai-gpt-oss-120b", "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
+    payload = {"model": "llama3.3-70b-instruct", "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
     with st.spinner(f"Generating {title}…"):
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=45)
@@ -435,7 +435,7 @@ if st.session_state.get("wrapup_ready", False):
                     cols = [c for c in ['Title', 'Author'] if c in (source_df.columns if source_df is not None else [])]
                     sample = source_df[cols].dropna().head(50).to_dict(orient='records') if cols else []
                     prompt_payload = {
-                        "model": "openai-gpt-oss-120b",
+                        "model": "llama3.3-70b-instruct",
                         "messages": [
                             {"role": "system", "content": "You are a strict JSON generator. Output only valid JSON with no commentary."},
                             {"role": "user", "content": (
@@ -482,7 +482,7 @@ if st.session_state.get("wrapup_ready", False):
                 if not parsed or not isinstance(parsed, dict):
                     # Retry without response_format to coax output
                     retry_payload = {
-                        "model": "openai-gpt-oss-120b",
+                        "model": "llama3.3-70b-instruct",
                         "messages": [
                             {"role": "system", "content": "Return only raw JSON. No prose."},
                             {"role": "user", "content": (
