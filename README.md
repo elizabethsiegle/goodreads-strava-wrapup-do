@@ -1,7 +1,7 @@
 ## Goodreads + Strava 2025 Wrapped
 
 - Users can upload Goodreads and Strava CSVs to generate a friendly 2025 wrap-up with charts and summaries
-- Stack: Streamlit, pandas, Altair, model calls via DigitalOcean Inference, DigitalOcean app platform
+- Stack: Streamlit, pandas, Altair, model calls via DigitalOcean Inference, deployed app via GitHub repo URL[DigitalOcean app platform](https://www.digitalocean.com/products/app-platform)
 
 Quick start
 - Install deps: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
